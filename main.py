@@ -28,6 +28,8 @@ def is_finger_down(tip_id, pip_id, lm_list):
 
 class HandController:
     def __init__(self):
+        self.left_hand_detected = None
+        self.right_hand_detected = None
         self.cap = cv2.VideoCapture(0)
         self.hands = mp.solutions.hands.Hands(max_num_hands=2, min_detection_confidence=0.7)
         self.mp_draw = mp.solutions.drawing_utils
@@ -36,8 +38,21 @@ class HandController:
             raise Exception("Failed to initialize interception context.")
         self.device = get_keyboard_id()
         self.mouse_device = get_mouse_id()
-        self.key_mappings = {'w': False, 'shift': False, 'a': False, 'd': False, 'space': False}
-        self.previous_key_mappings = self.key_mappings.copy()
+
+        self.left_key_mappings = {
+            'w': False,
+            'shift': False,
+            'a': False,
+            'd': False,
+            'space': False
+        }
+        self.right_key_mappings = {
+            'e': False, 
+            'q': False  
+        }
+        self.previous_left_key_mappings = self.left_key_mappings.copy()
+        self.previous_right_key_mappings = self.right_key_mappings.copy()
+
         self.finger_tips = {'thumb': 4, 'index': 8, 'middle': 12, 'ring': 16, 'pinky': 20}
         self.finger_pips = {'thumb': 3, 'index': 6, 'middle': 10, 'ring': 14, 'pinky': 18}
         self.key_codes = {
@@ -46,11 +61,22 @@ class HandController:
             'd': 0x20,
             'space': 0x39,
             'shift': 0x2A,
+            '1': 0x02,
+            '2': 0x03,
+            '3': 0x04,
+            '4': 0x05,
+            'e': 0x12, 
+            'q': 0x10  
         }
         self.walk_threshold = 5
         self.run_threshold = 30
         self.prev_right_hand_pos = None
         self.mouse_sensitivity = 16
+
+        self.current_key = 1
+        self.previous_number_key = 1
+        self.prev_index_closed = False
+        self.prev_thumb_closed = False
 
     def run(self):
         try:
@@ -72,11 +98,12 @@ class HandController:
                         lm_tensor = torch.tensor(lm_list)
                         if hand_label == 'Left':
                             self.left_hand_detected = True
-                            self.check_fingers(lm_tensor)
+                            self.check_fingers(lm_list) 
                         elif hand_label == 'Right':
                             self.right_hand_detected = True
                             self.move_mouse(lm_list)
-                if self.left_hand_detected:
+                            self.handle_right_hand_gestures(lm_list)
+                if self.left_hand_detected or self.right_hand_detected:
                     self.perform_actions()
                 else:
                     self.release_all_keys()
@@ -92,50 +119,94 @@ class HandController:
             lib.interception_destroy_context(self.interception_context)
 
     def check_fingers(self, lm_list):
-        self.key_mappings = dict.fromkeys(self.key_mappings, False)
+        for key in self.left_key_mappings:
+            self.left_key_mappings[key] = False
         if is_finger_down(self.finger_tips['index'], self.finger_pips['index'], lm_list):
-            self.key_mappings['d'] = True
+            self.left_key_mappings['d'] = True
         if is_finger_down(self.finger_tips['ring'], self.finger_pips['ring'], lm_list):
-            self.key_mappings['a'] = True
+            self.left_key_mappings['a'] = True
         if is_finger_down(self.finger_tips['thumb'], self.finger_pips['thumb'], lm_list):
-            self.key_mappings['space'] = True
+            self.left_key_mappings['space'] = True
         if is_finger_down(self.finger_tips['middle'], self.finger_pips['middle'], lm_list):
             y_tip = lm_list[self.finger_tips['middle']][2]
             y_pip = lm_list[self.finger_pips['middle']][2]
             vertical_distance = y_tip - y_pip
             if vertical_distance > self.run_threshold:
-                self.key_mappings['w'] = True
-                self.key_mappings['shift'] = True
+                self.left_key_mappings['w'] = True
+                self.left_key_mappings['shift'] = True
             elif vertical_distance > self.walk_threshold:
-                self.key_mappings['w'] = True
+                self.left_key_mappings['w'] = True
 
     def perform_actions(self):
-        for key in self.key_mappings:
-            if self.key_mappings[key] != self.previous_key_mappings[key]:
+        for key in self.left_key_mappings:
+            if self.left_key_mappings[key] != self.previous_left_key_mappings[key]:
                 key_code = self.key_codes[key]
-                state = lib.INTERCEPTION_KEY_DOWN if self.key_mappings[key] else lib.INTERCEPTION_KEY_UP
-                stroke = ffi.new("InterceptionKeyStroke *", {'code': key_code, 'state': state, 'information': 0})
+                state = lib.INTERCEPTION_KEY_DOWN if self.left_key_mappings[key] else lib.INTERCEPTION_KEY_UP
+                stroke = ffi.new("InterceptionKeyStroke *", {
+                    'code': key_code,
+                    'state': state,
+                    'information': 0
+                })
                 lib.interception_send(self.interception_context, self.device,
                                       ffi.cast("InterceptionStroke *", stroke), 1)
-        self.previous_key_mappings = self.key_mappings.copy()
+        self.previous_left_key_mappings = self.left_key_mappings.copy()
+
+        # Proses key_mappings tangan kanan
+        for key in self.right_key_mappings:
+            if self.right_key_mappings[key] != self.previous_right_key_mappings[key]:
+                key_code = self.key_codes[key]
+                state = lib.INTERCEPTION_KEY_DOWN if self.right_key_mappings[key] else lib.INTERCEPTION_KEY_UP
+                stroke = ffi.new("InterceptionKeyStroke *", {
+                    'code': key_code,
+                    'state': state,
+                    'information': 0
+                })
+                lib.interception_send(self.interception_context, self.device,
+                                      ffi.cast("InterceptionStroke *", stroke), 1)
+        self.previous_right_key_mappings = self.right_key_mappings.copy()
 
     def release_all_keys(self):
-        for key, pressed in self.previous_key_mappings.items():
+        for key, pressed in self.previous_left_key_mappings.items():
             if pressed:
                 key_code = self.key_codes[key]
-                stroke = ffi.new("InterceptionKeyStroke *", {'code': key_code, 'state': lib.INTERCEPTION_KEY_UP, 'information': 0})
+                stroke = ffi.new("InterceptionKeyStroke *", {
+                    'code': key_code,
+                    'state': lib.INTERCEPTION_KEY_UP,
+                    'information': 0
+                })
                 lib.interception_send(self.interception_context, self.device,
                                       ffi.cast("InterceptionStroke *", stroke), 1)
-        self.previous_key_mappings = dict.fromkeys(self.previous_key_mappings, False)
+        self.previous_left_key_mappings = self.left_key_mappings.copy()
+
+        for key, pressed in self.previous_right_key_mappings.items():
+            if pressed:
+                key_code = self.key_codes[key]
+                stroke = ffi.new("InterceptionKeyStroke *", {
+                    'code': key_code,
+                    'state': lib.INTERCEPTION_KEY_UP,
+                    'information': 0
+                })
+                lib.interception_send(self.interception_context, self.device,
+                                      ffi.cast("InterceptionStroke *", stroke), 1)
+        self.previous_right_key_mappings = self.right_key_mappings.copy()
 
     def is_hand_open(self, lm_list):
         fingers_up = 0
-        for finger in ['index', 'middle', 'ring', 'pinky']:
+        for finger in ['thumb', 'index', 'middle', 'ring', 'pinky']:
             tip_id = self.finger_tips[finger]
             pip_id = self.finger_pips[finger]
             if is_finger_up(tip_id, pip_id, lm_list):
                 fingers_up += 1
-        return fingers_up > 0
+        return fingers_up > 2
+
+    def is_fist(self, lm_list):
+        fingers_down = 0
+        for finger in ['thumb', 'index', 'middle', 'ring', 'pinky']:
+            tip_id = self.finger_tips[finger]
+            pip_id = self.finger_pips[finger]
+            if is_finger_down(tip_id, pip_id, lm_list):
+                fingers_down += 1
+        return fingers_down >= 4
 
     def move_mouse(self, lm_list):
         if self.is_hand_open(lm_list):
@@ -156,8 +227,81 @@ class HandController:
                                       ffi.cast("InterceptionStroke *", stroke), 1)
             self.prev_right_hand_pos = (current_x, current_y)
         else:
-            # Hand is making a fist; do not move the mouse
             self.prev_right_hand_pos = None
+
+    def handle_right_hand_gestures(self, lm_list):
+        if not self.is_fist(lm_list):
+            index_closed = is_finger_down(self.finger_tips['index'], self.finger_pips['index'], lm_list)
+            if index_closed and not self.prev_index_closed:
+                self.increment_key()
+                self.prev_index_closed = True
+            elif not index_closed:
+                self.prev_index_closed = False
+
+            thumb_closed = is_finger_down(self.finger_tips['thumb'], self.finger_pips['thumb'], lm_list)
+            if thumb_closed and not self.prev_thumb_closed:
+                self.decrement_key()
+                self.prev_thumb_closed = True
+            elif not thumb_closed:
+                self.prev_thumb_closed = False
+
+            middle_closed = is_finger_down(self.finger_tips['middle'], self.finger_pips['middle'], lm_list)
+            if middle_closed:
+                self.right_key_mappings['e'] = True
+            else:
+                self.right_key_mappings['e'] = False
+
+            pinky_closed = is_finger_down(self.finger_tips['pinky'], self.finger_pips['pinky'], lm_list)
+            if pinky_closed:
+                self.right_key_mappings['q'] = True
+            else:
+                self.right_key_mappings['q'] = False
+        else:
+            self.prev_index_closed = False
+            self.prev_thumb_closed = False
+            self.right_key_mappings['e'] = False
+            self.right_key_mappings['q'] = False
+
+    def increment_key(self):
+        old_key = self.current_key
+        self.current_key += 1
+        if self.current_key > 4:
+            self.current_key = 1
+        self.update_number_key(old_key, self.current_key)
+
+    def decrement_key(self):
+        old_key = self.current_key
+        self.current_key -= 1
+        if self.current_key < 1:
+            self.current_key = 4
+        self.update_number_key(old_key, self.current_key)
+
+    def update_number_key(self, old_key, new_key):
+        old_key_code = self.key_codes[str(old_key)]
+        stroke_up = ffi.new("InterceptionKeyStroke *", {
+            'code': old_key_code,
+            'state': lib.INTERCEPTION_KEY_UP,
+            'information': 0
+        })
+        lib.interception_send(self.interception_context, self.device,
+                              ffi.cast("InterceptionStroke *", stroke_up), 1)
+
+        new_key_code = self.key_codes[str(new_key)]
+        stroke_down = ffi.new("InterceptionKeyStroke *", {
+            'code': new_key_code,
+            'state': lib.INTERCEPTION_KEY_DOWN,
+            'information': 0
+        })
+        lib.interception_send(self.interception_context, self.device,
+                              ffi.cast("InterceptionStroke *", stroke_down), 1)
+
+        stroke_up_new = ffi.new("InterceptionKeyStroke *", {
+            'code': new_key_code,
+            'state': lib.INTERCEPTION_KEY_UP,
+            'information': 0
+        })
+        lib.interception_send(self.interception_context, self.device,
+                              ffi.cast("InterceptionStroke *", stroke_up_new), 1)
 
 
 if __name__ == "__main__":
